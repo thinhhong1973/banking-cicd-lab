@@ -1,0 +1,17 @@
+# Separate stack: DOES NOT recreate or modify the existing Jenkins service.
+services:
+  sonarqube:
+    image: sonarqube:community
+    container_name: banking-sonarqube
+    ports:
+      - "127.0.0.1:9000:9000"
+    environment:
+      SONAR_ES_BOOTSTRAP_CHECKS_DISABLE: "true" # local lab only
+    volumes:
+      - sonar_data:/opt/sonarqube/data
+      - sonar_extensions:/opt/sonarqube/extensions
+      - sonar_logs:/opt/sonarqube/logs
+volumes:
+  sonar_data:
+  sonar_extensions:
+  sonar_logs:
