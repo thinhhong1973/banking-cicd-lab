@@ -1,0 +1,10 @@
+services:
+  jenkins:
+    image: jenkins/jenkins:lts-jdk21
+    ports:
+      - "127.0.0.1:8085:8080"
+      - "127.0.0.1:50000:50000"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+volumes:
+  jenkins_home:
