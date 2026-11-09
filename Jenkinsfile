@@ -3,8 +3,8 @@ pipeline {
   options { timestamps(); disableConcurrentBuilds(); buildDiscarder(logRotator(numToKeepStr: '20')); timeout(time: 30, unit: 'MINUTES') }
   tools { jdk 'jdk21'; maven 'maven3' }
   environment {
-    TRIVY = '/var/jenkins_home/tools/trivy/trivy'
-    TRIVY_CACHE_DIR = '/var/jenkins_home/trivy-cache'
+    TRIVY = '/usr/local/bin/trivy'
+    TRIVY_CACHE_DIR = '/var/jenkins_home/.cache/trivy'
   }
   stages {
     stage('Checkout') { steps { checkout scm } }
