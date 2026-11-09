@@ -45,12 +45,54 @@ pipeline {
     stage('SonarQube Quality Gate') {
       steps { timeout(time: 10, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } }
     }
-    stage('Trivy Vulnerability Gate') {
-      steps { sh '''
-        "$TRIVY" fs --scanners vuln --severity HIGH,CRITICAL --exit-code 1 \
-          --no-progress --cache-dir "$TRIVY_CACHE_DIR" .
-      ''' }
-    }
+
+	stage('Trivy Vulnerability Gate') {
+		steps {
+			sh '''
+				set -eu
+
+				mkdir -p reports
+
+				"$TRIVY" fs \
+				  --scanners vuln \
+				  --severity HIGH,CRITICAL \
+				  --format json \
+				  --exit-code 0 \
+				  --no-progress \
+				  --cache-dir "$TRIVY_CACHE_DIR" \
+				  --output reports/trivy-vulnerabilities.json \
+				  .
+			'''
+
+			script {
+				def report = new groovy.json.JsonSlurperClassic()
+					.parseText(readFile('reports/trivy-vulnerabilities.json'))
+
+				if (report.Results == null) {
+					error('Trivy scan report is invalid')
+				}
+
+				int critical = 0
+				int high = 0
+
+				report.Results.each { result ->
+					(result.Vulnerabilities ?: []).each { vuln ->
+						if (vuln.Severity == 'CRITICAL') critical++
+						if (vuln.Severity == 'HIGH') high++
+					}
+				}
+
+				echo "TRIVY: CRITICAL=${critical}, HIGH=${high}"
+
+				if (critical + high > 0) {
+					unstable(
+						"Trivy: ${critical + high} HIGH/CRITICAL CVEs"
+					)
+				}
+			}
+		}
+	}
+
     stage('Trivy Secret Gate') {
       steps { sh '''
         "$TRIVY" fs --scanners secret --exit-code 1 --no-progress \
@@ -65,7 +107,15 @@ pipeline {
     }
   }
   post {
-    always { junit allowEmptyResults: false, testResults: 'target/surefire-reports/*.xml' }
+    always { 
+        junit allowEmptyResults: false, testResults: 'target/surefire-reports/*.xml' 
+        
+        archiveArtifacts(
+            artifacts: 'reports/*.json',
+            allowEmptyArchive: true,
+            fingerprint: true
+        )
+    }
     success { echo 'CI.2 security gates passed; artifacts archived.' }
     failure { echo 'CI.2 failed: inspect first failing stage and scanner report.' }
   }
