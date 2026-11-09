@@ -18,17 +18,30 @@ pipeline {
     stage('Compile & Unit Tests') {
       steps { sh 'mvn -B -ntp clean verify' }
     }
-    stage('SonarQube Analysis') {
-      steps {
-        withSonarQubeEnv('banking-sonarqube') {
-          sh '''
-            mvn -B -ntp org.sonarsource.scanner.maven:sonar-maven-plugin:5.1.0.4751:sonar \
-              -Dsonar.projectKey=banking-api \
-              -Dsonar.projectName=banking-api
-          '''
-        }
-      }
-    }
+
+	stage('SonarQube Analysis') {
+		steps {
+			withSonarQubeEnv(
+				installationName: 'banking-sonarqube',
+				credentialsId: 'sonarqube-token'
+			) {
+				sh '''
+					set -eu
+
+					# Supplied securely by the SonarQube Jenkins plugin
+					test -n "${SONAR_AUTH_TOKEN:-}"
+
+					export SONAR_TOKEN="$SONAR_AUTH_TOKEN"
+
+					mvn -B -ntp \
+					  org.sonarsource.scanner.maven:sonar-maven-plugin:5.1.0.4751:sonar \
+					  -Dsonar.projectKey=banking-api \
+					  -Dsonar.projectName=banking-api
+				'''
+			}
+		}
+	}
+
     stage('SonarQube Quality Gate') {
       steps { timeout(time: 10, unit: 'MINUTES') { waitForQualityGate abortPipeline: true } }
     }
