@@ -117,6 +117,21 @@ pipeline {
         archiveArtifacts artifacts: 'target/*.jar,target/SHA256SUMS.txt', fingerprint: true
       }
     }
+	
+	stage('Final Security Gate') {
+		steps {
+			script {
+				if (currentBuild.currentResult == 'UNSTABLE') {
+					error(
+						'SECURITY GATE FAILED: ' +
+						'Build contains unresolved security findings'
+					)
+				}
+
+				echo 'FINAL SECURITY GATE PASSED'
+			}
+		}
+	}
   }
   post {
     always { 
