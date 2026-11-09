@@ -1,5 +1,5 @@
 pipeline {
-  agent any
+  agent { label 'built-in' }
   options { timestamps(); disableConcurrentBuilds(); buildDiscarder(logRotator(numToKeepStr: '20')); timeout(time: 30, unit: 'MINUTES') }
   tools { jdk 'jdk21'; maven 'maven3' }
   environment {
@@ -111,6 +111,97 @@ pipeline {
           --cache-dir "$TRIVY_CACHE_DIR" .
       ''' }
     }
+
+	stage('Docker Image Security Gate') {
+		agent {
+			label 'docker-build'
+		}
+
+		steps {
+			checkout scm
+
+			sh '''
+				set -eu
+
+				IMAGE_TAG="banking-api:ci-${BUILD_NUMBER}"
+
+				mkdir -p reports
+				rm -f reports/trivy-image.json
+
+				echo "Building Docker image: $IMAGE_TAG"
+
+				docker build --pull \
+				  -t "$IMAGE_TAG" .
+
+				docker image inspect \
+				  --format '{{.Id}}' "$IMAGE_TAG" \
+				  > reports/docker-image-id.txt
+
+				docker save \
+				  -o banking-api-image.tar \
+				  "$IMAGE_TAG"
+
+				trivy image \
+				  --input banking-api-image.tar \
+				  --scanners vuln \
+				  --severity HIGH,CRITICAL \
+				  --format json \
+				  --exit-code 0 \
+				  --no-progress \
+				  --cache-dir /home/jenkins/.cache/trivy \
+				  --output reports/trivy-image.json
+			'''
+
+			script {
+				def report = readJSON(
+					file: 'reports/trivy-image.json',
+					returnPojo: true
+				)
+
+				if (report.Results == null) {
+					error('Invalid Trivy image report')
+				}
+
+				int critical = 0
+				int high = 0
+
+				report.Results.each { result ->
+					(result.Vulnerabilities ?: []).each { vuln ->
+						if (vuln.Severity == 'CRITICAL') {
+							critical++
+						} else if (vuln.Severity == 'HIGH') {
+							high++
+						}
+					}
+				}
+
+				echo "IMAGE CRITICAL: ${critical}"
+				echo "IMAGE HIGH: ${high}"
+
+				if (critical + high > 0) {
+					unstable(
+						"Docker image contains " +
+						"${critical + high} HIGH/CRITICAL findings"
+					)
+				} else {
+					echo 'DOCKER IMAGE SECURITY GATE PASSED'
+				}
+			}
+		}
+
+		post {
+			always {
+				archiveArtifacts(
+					artifacts: 'reports/trivy-image.json,reports/docker-image-id.txt',
+					allowEmptyArchive: true,
+					fingerprint: true
+				)
+
+				sh 'rm -f banking-api-image.tar'
+			}
+		}
+	}
+
     stage('Artifact Evidence') {
       steps {
         sh 'sha256sum target/*.jar > target/SHA256SUMS.txt'
