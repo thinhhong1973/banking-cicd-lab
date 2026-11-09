@@ -1,3 +1,8 @@
 .git
-.idea
+.gitignore
+target/
+reports/
+*.log
 *.md
+.idea/
+.vscode/
