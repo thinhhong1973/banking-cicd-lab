@@ -1,0 +1,10 @@
+target/
+.idea/
+*.iml
+*.log
+jenkin-pass.txt
+.env
+
+# Kubernetes credentials
+jenkins-banking-kubeconfig.yaml
+*.kubeconfig
