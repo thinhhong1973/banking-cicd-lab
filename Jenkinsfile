@@ -273,7 +273,10 @@ pipeline {
 
 				docker image inspect "$IMAGE_REGISTRY" \
 				  --format '{{index .RepoDigests 0}}' \
+				  | sed 's#^banking-api@#localhost:5000/banking-api@#' \
 				  > reports/published-image-digest.txt
+
+				cat reports/published-image-digest.txt
 
 				test -s reports/published-image-digest.txt
 
@@ -341,6 +344,23 @@ pipeline {
 						variable: 'KUBECONFIG'
 					)
 				]) {
+				
+					sh '''
+						set -eu
+						set +x
+
+						echo "Checking Kubernetes authentication..."
+
+						kubectl -n banking-dev get deployment banking-api
+
+						echo "Checking deployment permission..."
+
+						kubectl auth can-i patch deployment/banking-api \
+						  -n banking-dev
+
+						echo "KUBERNETES AUTHENTICATION PASSED"
+					'''
+		
 					sh '''
 						set -eu
 						set +x
