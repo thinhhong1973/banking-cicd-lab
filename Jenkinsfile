@@ -223,6 +223,76 @@ pipeline {
 			}
 		}
 	}
+	
+	stage('Registry Publish') {
+		agent {
+			label 'docker-build'
+		}
+
+		when {
+			beforeAgent true
+			expression {
+				return currentBuild.currentResult == 'SUCCESS'
+			}
+		}
+
+		steps {
+			sh '''
+				set -eu
+
+				IMAGE_LOCAL="banking-api:ci-${BUILD_NUMBER}"
+				IMAGE_REGISTRY="localhost:5000/banking-api:ci-${BUILD_NUMBER}"
+
+				mkdir -p reports
+
+				echo "Checking approved image..."
+
+				docker image inspect "$IMAGE_LOCAL" \
+				  --format '{{.Id}}' \
+				  > reports/image-id-before-push.txt
+
+				echo "Tagging the approved image..."
+
+				docker tag "$IMAGE_LOCAL" "$IMAGE_REGISTRY"
+
+				echo "Publishing image to registry..."
+
+				docker push "$IMAGE_REGISTRY"
+
+				echo "Verifying pushed image..."
+
+				docker pull "$IMAGE_REGISTRY"
+
+				docker image inspect "$IMAGE_REGISTRY" \
+				  --format '{{.Id}}' \
+				  > reports/image-id-after-push.txt
+
+				cmp \
+				  reports/image-id-before-push.txt \
+				  reports/image-id-after-push.txt
+
+				docker image inspect "$IMAGE_REGISTRY" \
+				  --format '{{index .RepoDigests 0}}' \
+				  > reports/published-image-digest.txt
+
+				test -s reports/published-image-digest.txt
+
+				echo "REGISTRY PUBLISH PASSED"
+				cat reports/published-image-digest.txt
+			'''
+		}
+
+		post {
+			always {
+				archiveArtifacts(
+					artifacts: 'reports/image-id-*.txt,reports/published-image-digest.txt',
+					allowEmptyArchive: true,
+					fingerprint: true
+				)
+			}
+		}
+	}
+
   }
   post {
     always { 
