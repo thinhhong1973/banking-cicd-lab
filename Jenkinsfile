@@ -320,10 +320,24 @@ pipeline {
 			label 'docker-build'
 		}
 		
-		environment {
-			PATH+KUBECTL = '/home/jenkins/agent/bin'
-		}
+		steps {
+			withEnv(['PATH+KUBECTL=/home/jenkins/agent/bin']) {
 
+				sh '''
+					set -eu
+
+					echo "Checking kubectl..."
+					command -v kubectl
+					kubectl version --client
+
+					echo "Kubectl ready"
+				'''
+
+				// Đặt withCredentials và toàn bộ
+				// script triển khai Kubernetes tại đây.
+			}
+		}
+		
 		steps {
 			unstash 'approved-image'
 
