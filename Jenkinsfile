@@ -280,6 +280,11 @@ pipeline {
 				echo "REGISTRY PUBLISH PASSED"
 				cat reports/published-image-digest.txt
 			'''
+			
+			stash(
+				name: 'approved-image',
+				includes: 'reports/published-image-digest.txt'
+			)
 		}
 
 		post {
@@ -292,6 +297,174 @@ pipeline {
 			}
 		}
 	}
+	stage('Deployment Approval') {
+		when {
+			expression {
+				currentBuild.currentResult == 'SUCCESS'
+			}
+		}
+
+		steps {
+			timeout(time: 10, unit: 'MINUTES') {
+				input(
+					message: 'Deploy approved Banking API to banking-dev?',
+					ok: 'Approve Deployment'
+				)
+			}
+		}
+	}
+	
+	
+	stage('Kubernetes Deploy & Smoke Test') {
+		agent {
+			label 'docker-build'
+		}
+		
+		environment {
+			PATH+KUBECTL = '/home/jenkins/agent/bin'
+		}
+
+		steps {
+			unstash 'approved-image'
+
+			withCredentials([
+				file(
+					credentialsId: 'banking-dev-kubeconfig',
+					variable: 'KUBECONFIG'
+				)
+			]) {
+				sh '''
+					set -eu
+					set +x
+
+					NS="banking-dev"
+					DEPLOY="banking-api"
+					NEW_IMAGE="$(cat reports/published-image-digest.txt)"
+					OLD_IMAGE="$(kubectl -n "$NS" get deployment "$DEPLOY" \
+					  -o jsonpath='{.spec.template.spec.containers[0].image}')"
+
+					case "$NEW_IMAGE" in
+					  localhost:5000/banking-api@sha256:*) ;;
+					  *) echo "Invalid approved image reference"; exit 1 ;;
+					esac
+
+					mkdir -p reports
+					printf '%s\\n' "$OLD_IMAGE" \
+					  > reports/previous-image.txt
+					printf '%s\\n' "$NEW_IMAGE" \
+					  > reports/deployed-image.txt
+
+					DEPLOY_STARTED=0
+					COMPLETED=0
+					PF_PID=""
+
+					cleanup() {
+						rc=$?
+						trap - EXIT
+
+						if [ -n "$PF_PID" ]; then
+							kill "$PF_PID" 2>/dev/null || true
+						fi
+
+						if [ "$COMPLETED" -ne 1 ] &&
+						   [ "$DEPLOY_STARTED" -eq 1 ]; then
+							echo "Deployment failed. Restoring previous image..."
+
+							kubectl -n "$NS" set image \
+							  deployment/"$DEPLOY" \
+							  banking-api="$OLD_IMAGE" || true
+
+							kubectl -n "$NS" rollout status \
+							  deployment/"$DEPLOY" \
+							  --timeout=180s || true
+
+							echo "ROLLBACK ATTEMPTED"
+							printf '%s\\n' "ROLLBACK_ATTEMPTED" \
+							  > reports/deploy-result.txt
+						fi
+
+						exit "$rc"
+					}
+
+					trap cleanup EXIT
+
+					echo "Previous image: $OLD_IMAGE"
+					echo "Approved image: $NEW_IMAGE"
+
+					if [ "$OLD_IMAGE" != "$NEW_IMAGE" ]; then
+						kubectl -n "$NS" set image \
+						  deployment/"$DEPLOY" \
+						  banking-api="$NEW_IMAGE"
+
+						DEPLOY_STARTED=1
+					fi
+
+					kubectl -n "$NS" rollout status \
+					  deployment/"$DEPLOY" \
+					  --timeout=180s
+
+					kubectl -n "$NS" get deployment "$DEPLOY" \
+					  -o yaml > reports/deployment-evidence.yaml
+
+					ACTUAL_IMAGE="$(kubectl -n "$NS" get deployment "$DEPLOY" \
+					  -o jsonpath='{.spec.template.spec.containers[0].image}')"
+
+					test "$ACTUAL_IMAGE" = "$NEW_IMAGE"
+
+					kubectl -n "$NS" get deployment "$DEPLOY" \
+					  -o jsonpath='{.status.readyReplicas}' \
+					  > reports/ready-replicas.txt
+
+					test "$(cat reports/ready-replicas.txt)" = "2"
+
+					# Port forward for smoke testing
+					kubectl -n "$NS" port-forward \
+					  service/banking-api 18080:8080 \
+					  > reports/port-forward.log 2>&1 &
+
+					PF_PID=$!
+
+					READY=0
+					for i in $(seq 1 30); do
+						if curl -fsS \
+						  http://127.0.0.1:18080/actuator/health/readiness \
+						  > reports/readiness.json 2>/dev/null; then
+							READY=1
+							break
+						fi
+						sleep 2
+					done
+
+					test "$READY" -eq 1
+					grep -q '"status":"UP"' reports/readiness.json
+
+					curl -fsS \
+					  http://127.0.0.1:18080/api/v1/accounts/ACC-001/balance \
+					  > reports/balance-smoke.json
+
+					grep -q 'VND' reports/balance-smoke.json
+
+					printf '%s\\n' "SUCCESS" \
+					  > reports/deploy-result.txt
+
+					COMPLETED=1
+					echo "KUBERNETES DEPLOYMENT PASSED"
+					echo "REST SMOKE TEST PASSED"
+				'''
+			}
+		}
+
+		post {
+			always {
+				archiveArtifacts(
+					artifacts: 'reports/deploy-result.txt,reports/previous-image.txt,reports/deployed-image.txt,reports/deployment-evidence.yaml,reports/ready-replicas.txt,reports/readiness.json,reports/balance-smoke.json,reports/port-forward.log',
+					allowEmptyArchive: true,
+					fingerprint: true
+				)
+			}
+		}
+	}
+
 
   }
   post {
