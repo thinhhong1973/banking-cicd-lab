@@ -1,0 +1,57 @@
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jenkins-deployer
+  namespace: banking-dev
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jenkins-deployer
+  namespace: banking-dev
+rules:
+  # Mutate only the Banking API Deployment
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["banking-api"]
+    verbs: ["get", "patch", "update", "watch"]
+
+  # Required by kubectl rollout status
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["list"]
+
+  # Observe rollout resources
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+
+  # Smoke-test port forwarding
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
+
+  - apiGroups: [""]
+    resources: ["services"]
+    resourceNames: ["banking-api"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jenkins-deployer
+  namespace: banking-dev
+subjects:
+  - kind: ServiceAccount
+    name: jenkins-deployer
+    namespace: banking-dev
+roleRef:
+  kind: Role
+  name: jenkins-deployer
+  apiGroup: rbac.authorization.k8s.io

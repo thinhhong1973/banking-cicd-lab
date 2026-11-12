@@ -1,0 +1,78 @@
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: banking-api
+  namespace: banking-dev
+  labels:
+    app: banking-api
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
+  selector:
+    matchLabels:
+      app: banking-api
+
+  template:
+    metadata:
+      labels:
+        app: banking-api
+    spec:
+      containers:
+        - name: banking-api
+          image: IMAGE_REFERENCE_PLACEHOLDER
+          imagePullPolicy: Always
+
+          ports:
+            - name: http
+              containerPort: 8080
+
+          env:
+            - name: MANAGEMENT_ENDPOINT_HEALTH_PROBES_ENABLED
+              value: "true"
+
+          startupProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 3
+
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+            runAsNonRoot: true
+             runAsUser: 999

@@ -364,6 +364,19 @@ pipeline {
 					sh '''
 						set -eu
 						set +x
+						
+						echo "Checking Kubernetes RBAC..."
+
+						test "$(kubectl auth can-i get deployment/banking-api \
+						  -n banking-dev)" = "yes"
+
+						test "$(kubectl auth can-i patch deployment/banking-api \
+						  -n banking-dev)" = "yes"
+
+						test "$(kubectl auth can-i list deployments \
+						  -n banking-dev)" = "yes"
+
+						echo "KUBERNETES RBAC CHECK PASSED"
 
 						NS="banking-dev"
 						DEPLOY="banking-api"
