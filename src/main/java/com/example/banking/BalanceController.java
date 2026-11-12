@@ -8,6 +8,6 @@ public class BalanceController {
   @GetMapping("/{id}/balance")
   public Map<String,Object> balance(@PathVariable String id) {
     if (!"ACC-001".equals(id)) throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND);
-    return Map.of("accountId", id, "balance", new BigDecimal("125000.50"), "currency", "VND");
+    return Map.of("accountId", id, "balance", new BigDecimal("135000.50"), "currency", "VND");
   }
 }
