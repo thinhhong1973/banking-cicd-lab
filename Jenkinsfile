@@ -187,12 +187,57 @@ pipeline {
 					echo 'DOCKER IMAGE SECURITY GATE PASSED'
 				}
 			}
+			
+			
+			sh '''
+				set -eu
+
+				echo "Generating CycloneDX SBOM..."
+				rm -f reports/sbom.cdx.json
+				test -s banking-api-image.tar
+				mkdir -p reports
+
+				trivy image \
+				  --input banking-api-image.tar \
+				  --format cyclonedx \
+				  --scanners vuln \
+				  --no-progress \
+				  --cache-dir /home/jenkins/.cache/trivy \
+				  --output reports/sbom.cdx.json
+
+				test -s reports/sbom.cdx.json
+
+				echo "SBOM GENERATED"
+			'''
+
+			script {
+				def sbom = readJSON(
+					file: 'reports/sbom.cdx.json',
+					returnPojo: true
+				)
+
+				if (sbom.bomFormat != 'CycloneDX') {
+					error('SBOM VALIDATION FAILED: Invalid format')
+				}
+
+				def components = sbom.components ?: []
+
+				if (components.isEmpty()) {
+					error('SBOM VALIDATION FAILED: No components detected')
+				}
+
+				echo "SBOM FORMAT: ${sbom.bomFormat}"
+				echo "SBOM VERSION: ${sbom.specVersion}"
+				echo "SBOM COMPONENTS: ${components.size()}"
+				echo "SBOM VALIDATION PASSED"
+			}
+
 		}
 
 		post {
 			always {
 				archiveArtifacts(
-					artifacts: 'reports/trivy-image.json,reports/docker-image-id.txt',
+					artifacts: 'reports/trivy-image.json,reports/docker-image-id.txt,reports/sbom.cdx.json',
 					allowEmptyArchive: true,
 					fingerprint: true
 				)
@@ -288,12 +333,55 @@ pipeline {
 				name: 'approved-image',
 				includes: 'reports/published-image-digest.txt'
 			)
+
+			script {
+				def imageRef = readFile(
+					'reports/published-image-digest.txt'
+				).trim()
+				def prefix = 'localhost:5000/banking-api@sha256:'
+				if (!imageRef.startsWith(prefix) ||
+					!(imageRef.substring(prefix.length()) ==~ /[0-9a-f]{64}/)) {
+					error('Invalid published image reference')
+				}
+
+				def gitSha = sh(
+					script: 'git rev-parse HEAD',
+					returnStdout: true
+				).trim()
+
+				def imageId = readFile(
+					'reports/image-id-before-push.txt'
+				).trim()
+
+				def manifest = [
+					schemaVersion : '1.0',
+					application   : 'banking-api',
+					environment   : 'banking-dev',
+					sourceCommit  : gitSha,
+					jenkinsJob    : env.JOB_NAME,
+					jenkinsBuild  : env.BUILD_NUMBER,
+					buildUrl      : env.BUILD_URL,
+					imageReference: imageRef,
+					imageId       : imageId,
+					sbom          : 'reports/sbom.cdx.json',
+					securityReport: 'reports/trivy-image.json'
+				]
+
+				writeJSON(
+					file: 'reports/release-manifest.json',
+					json: manifest,
+					pretty: 4
+				)
+
+				echo "RELEASE MANIFEST GENERATED"
+			}
+			
 		}
 
 		post {
 			always {
 				archiveArtifacts(
-					artifacts: 'reports/image-id-*.txt,reports/published-image-digest.txt',
+					artifacts: 'reports/published-image-digest.txt,reports/release-manifest.json,reports/image-id-*.txt',
 					allowEmptyArchive: true,
 					fingerprint: true
 				)
