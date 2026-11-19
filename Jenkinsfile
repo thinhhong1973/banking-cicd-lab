@@ -300,6 +300,7 @@ pipeline {
 			}
 		}
 	}
+	/*
 	stage('Deployment Approval') {
 		when {
 			expression {
@@ -316,7 +317,7 @@ pipeline {
 			}
 		}
 	}
-	
+	*/
 	
 	stage('Kubernetes Deploy & Smoke Test') {
 		agent {
