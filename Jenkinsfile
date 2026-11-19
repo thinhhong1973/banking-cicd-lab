@@ -342,7 +342,7 @@ pipeline {
 				if (!imageRef.startsWith(prefix) ||
 					!(imageRef.substring(prefix.length()) ==~ /[0-9a-f]{64}/)) {
 					error('Invalid published image reference')
-				}
+				} 	
 
 				def gitSha = sh(
 					script: 'git rev-parse HEAD',
