@@ -8,3 +8,7 @@ jenkin-pass.txt
 # Kubernetes credentials
 jenkins-banking-kubeconfig.yaml
 *.kubeconfig
+
+# Cosign private signing keys
+cosign.key
+*.cosign.key

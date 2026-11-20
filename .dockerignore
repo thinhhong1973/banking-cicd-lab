@@ -6,3 +6,7 @@ reports/
 *.md
 .idea/
 .vscode/
+cosign.key
+*.cosign.key
+*.kubeconfig
+jenkins-banking-kubeconfig.yaml

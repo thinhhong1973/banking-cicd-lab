@@ -388,6 +388,131 @@ pipeline {
 			}
 		}
 	}
+	
+	stage('Image Signing') {
+		agent {
+			label 'docker-build'
+		}
+
+		when {
+			beforeAgent true
+			expression {
+				currentBuild.currentResult == 'SUCCESS'
+			}
+		}
+
+		steps {
+			unstash 'approved-image'
+
+			withEnv([
+				'PATH+COSIGN=/home/jenkins/agent/bin'
+			]) {
+				withCredentials([
+					file(
+						credentialsId: 'banking-cosign-private-key',
+						variable: 'COSIGN_KEY_FILE'
+					),
+					string(
+						credentialsId: 'banking-cosign-password',
+						variable: 'COSIGN_PASSWORD'
+					)
+				]) {
+					sh '''
+						set -eu
+						set +x
+
+						IMAGE_REF="$(cat reports/published-image-digest.txt)"
+
+						echo "Signing approved image: $IMAGE_REF"
+
+						# Docker daemon and Jenkins agent have
+						# different network namespaces.
+						# Access registry directly via Docker DNS.
+
+						SIGN_REF="ci-registry-1:5000/${IMAGE_REF#localhost:5000/}"
+
+						cosign sign \
+						  --key "$COSIGN_KEY_FILE" \
+						  --allow-http-registry \
+						  --tlog-upload=false \
+						  --use-signing-config=false \
+						  --yes \
+						  "$SIGN_REF"
+
+						echo "IMAGE SIGNING PASSED"
+					'''
+				}
+			}
+		}
+	}
+
+	stage('Image Signature Verification') {
+		agent {
+			label 'docker-build'
+		}
+
+		steps {
+			unstash 'approved-image'
+
+			withEnv([
+				'PATH+COSIGN=/home/jenkins/agent/bin'
+			]) {
+				withCredentials([
+					file(
+						credentialsId: 'banking-cosign-public-key',
+						variable: 'COSIGN_PUBLIC_KEY'
+					)
+				]) {
+					sh '''
+						set -eu
+						set +x
+
+						mkdir -p reports
+
+						rm -f reports/cosign-verification.json
+						rm -f reports/signature-verified-image.txt
+
+						IMAGE_REF="$(cat reports/published-image-digest.txt)"
+
+						VERIFY_REF="ci-registry-1:5000/${IMAGE_REF#localhost:5000/}"
+
+						echo "Verifying image: $IMAGE_REF"
+
+						cosign verify \
+						  --key "$COSIGN_PUBLIC_KEY" \
+						  --allow-http-registry \
+						  --insecure-ignore-tlog=true \
+						  "$VERIFY_REF" \
+						  > reports/cosign-verification.json
+
+						test -s reports/cosign-verification.json
+
+						printf '%s\\n' "$IMAGE_REF" \
+						  > reports/signature-verified-image.txt
+
+						echo "IMAGE SIGNATURE VERIFICATION PASSED"
+					'''
+				}
+			}
+
+			stash(
+				name: 'verified-image',
+				includes: 'reports/signature-verified-image.txt'
+			)
+		}
+
+		post {
+			always {
+				archiveArtifacts(
+					artifacts: 'reports/cosign-verification.json,reports/signature-verified-image.txt',
+					fingerprint: true,
+					allowEmptyArchive: true
+				)
+			}
+		}
+	}
+
+
 	/*
 	stage('Deployment Approval') {
 		when {
@@ -426,6 +551,8 @@ pipeline {
 				'''
 
 				unstash 'approved-image'
+				
+				unstash 'verified-image'
 
 				withCredentials([
 					file(
@@ -522,6 +649,12 @@ pipeline {
 						echo "Approved image: $NEW_IMAGE"
 
 						if [ "$OLD_IMAGE" != "$NEW_IMAGE" ]; then
+							test -s reports/signature-verified-image.txt
+
+							cmp reports/published-image-digest.txt \
+								reports/signature-verified-image.txt
+
+							echo "VERIFIED RELEASE DIGEST MATCHED"
 							kubectl -n "$NS" set image \
 							  deployment/"$DEPLOY" \
 							  banking-api="$NEW_IMAGE"
