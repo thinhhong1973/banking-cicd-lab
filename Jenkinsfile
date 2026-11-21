@@ -439,6 +439,8 @@ pipeline {
 						  --allow-http-registry \
 						  --tlog-upload=false \
 						  --use-signing-config=false \
+						  --new-bundle-format=false \
+						  --registry-referrers-mode=legacy \
 						  --yes \
 						  "$SIGN_REF"
 
