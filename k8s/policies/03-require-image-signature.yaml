@@ -13,8 +13,8 @@ metadata:
 
 spec:
   validationActions:
+    - Deny
     - Audit
-    - Warn
 
   failurePolicy: Fail
 
@@ -62,7 +62,10 @@ spec:
       cosign:
         key:
           data: |
-
+            -----BEGIN PUBLIC KEY-----
+            MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEiZeLZGRceVcXPaL0G7MZ5Z/OL+mN
+            caKH8vZs+DC7DAmaWF0+/fnvA9XhJm+gzWVwl0MMTDRM+5oszYk+3Hye9Q==
+            -----END PUBLIC KEY-----
         ctlog:
           insecureIgnoreTlog: true
 
@@ -92,5 +95,4 @@ spec:
           )
         ).all(count, count > 0)
       message: Ephemeral container signature verification failed.
-
 
