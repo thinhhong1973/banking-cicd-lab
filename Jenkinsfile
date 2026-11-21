@@ -516,7 +516,6 @@ pipeline {
 		}
 	}
 
-
 	/*
 	stage('Deployment Approval') {
 		when {
