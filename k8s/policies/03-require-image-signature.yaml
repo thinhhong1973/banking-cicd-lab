@@ -1,0 +1,96 @@
+﻿
+apiVersion: policies.kyverno.io/v1
+kind: ImageValidatingPolicy
+metadata:
+  name: require-banking-image-signature
+  annotations:
+    policies.kyverno.io/title: Banking Image Signature
+    policies.kyverno.io/category: Supply Chain Security
+    policies.kyverno.io/severity: critical
+    policies.kyverno.io/description: >-
+      All images in banking-dev must have a valid
+      signature from the trusted Banking Cosign key.
+
+spec:
+  validationActions:
+    - Audit
+    - Warn
+
+  failurePolicy: Fail
+
+  webhookConfiguration:
+    timeoutSeconds: 30
+
+  evaluation:
+    background:
+      enabled: true
+
+  autogen:
+    podControllers:
+      controllers:
+        - deployments
+        - statefulsets
+        - daemonsets
+        - replicasets
+        - jobs
+        - cronjobs
+
+  matchConstraints:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: banking-dev
+
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+
+  matchImageReferences:
+    - glob: "ci-registry-1:5000/*"
+
+  credentials:
+    allowInsecureRegistry: true
+
+  validationConfigurations:
+    mutateDigest: false
+    verifyDigest: true
+    required: true
+
+  attestors:
+    - name: bankingSigner
+      cosign:
+        key:
+          data: |
+
+        ctlog:
+          insecureIgnoreTlog: true
+
+  validations:
+    - expression: >-
+        images.containers.map(image,
+          verifyImageSignatures(
+            image, [attestors.bankingSigner]
+          )
+        ).all(count, count > 0)
+      message: >-
+        Image signature verification failed.
+        A valid Banking Cosign signature is required.
+
+    - expression: >-
+        images.initContainers.map(image,
+          verifyImageSignatures(
+            image, [attestors.bankingSigner]
+          )
+        ).all(count, count > 0)
+      message: Init container signature verification failed.
+
+    - expression: >-
+        images.ephemeralContainers.map(image,
+          verifyImageSignatures(
+            image, [attestors.bankingSigner]
+          )
+        ).all(count, count > 0)
+      message: Ephemeral container signature verification failed.
+
+
