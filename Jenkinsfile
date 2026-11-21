@@ -320,13 +320,16 @@ pipeline {
 				  --format '{{index .RepoDigests 0}}' \
 				  | sed 's#^banking-api@#localhost:5000/banking-api@#' \
 				  > reports/published-image-digest.txt
+				  
+				sed -i 's#^localhost:5000/#ci-registry-1:5000/#' \
+					reports/published-image-digest.txt
 
 				cat reports/published-image-digest.txt
 
 				test -s reports/published-image-digest.txt
 
 				echo "REGISTRY PUBLISH PASSED"
-				cat reports/published-image-digest.txt
+				/*cat reports/published-image-digest.txt*/
 			'''
 			
 			stash(
@@ -338,7 +341,7 @@ pipeline {
 				def imageRef = readFile(
 					'reports/published-image-digest.txt'
 				).trim()
-				def prefix = 'localhost:5000/banking-api@sha256:'
+				def prefix = 'ci-registry-1:5000/banking-api@sha256:'
 				if (!imageRef.startsWith(prefix) ||
 					!(imageRef.substring(prefix.length()) ==~ /[0-9a-f]{64}/)) {
 					error('Invalid published image reference')
@@ -429,7 +432,8 @@ pipeline {
 						# different network namespaces.
 						# Access registry directly via Docker DNS.
 
-						SIGN_REF="ci-registry-1:5000/${IMAGE_REF#localhost:5000/}"
+						/*SIGN_REF="ci-registry-1:5000/${IMAGE_REF#localhost:5000/}"*/
+						SIGN_REF="$IMAGE_REF"
 
 						cosign sign \
 						  --key "$COSIGN_KEY_FILE" \
@@ -474,7 +478,8 @@ pipeline {
 
 						IMAGE_REF="$(cat reports/published-image-digest.txt)"
 
-						VERIFY_REF="ci-registry-1:5000/${IMAGE_REF#localhost:5000/}"
+						/*VERIFY_REF="ci-registry-1:5000/${IMAGE_REF#localhost:5000/}"*/
+						VERIFY_REF="$IMAGE_REF"
 
 						echo "Verifying image: $IMAGE_REF"
 
@@ -601,7 +606,7 @@ pipeline {
 						  -o jsonpath='{.spec.template.spec.containers[0].image}')"
 
 						case "$NEW_IMAGE" in
-						  localhost:5000/banking-api@sha256:*) ;;
+						  ci-registry-1:5000/banking-api@sha256:*) ;;
 						  *) echo "Invalid approved image reference"; exit 1 ;;
 						esac
 
