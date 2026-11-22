@@ -531,8 +531,10 @@ pipeline {
 			unstash 'release-sbom'
 			script {
 				def imageRef = readFile('reports/published-image-digest.txt').trim()
-				def m = (imageRef =~ /^ci-registry-1:5000\/banking-api@sha256:([0-9a-f]{64})$/)
-				if (!m.matches()) { error('PROVENANCE FAILED: unexpected image reference') }
+				// Do not retain java.util.regex.Matcher across Jenkins CPS suspension points.
+				if (!(imageRef ==~ /^ci-registry-1:5000\/banking-api@sha256:[0-9a-f]{64}$/)) {
+					error('PROVENANCE FAILED: unexpected image reference')
+				}
 				def gitSha = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
 				if (!(gitSha ==~ /[0-9a-f]{40}/)) { error('PROVENANCE FAILED: invalid Git SHA') }
 				def sbom = readJSON(file: 'reports/sbom.cdx.json', returnPojo: true)
@@ -643,46 +645,65 @@ pipeline {
 				def expectations = readJSON(file: 'reports/attestation-expectations.json', returnPojo: true)
 				def approvedImage = readFile('reports/published-image-digest.txt').trim()
 				if (expectations.imageReference != approvedImage) { error('ATTESTATION: image-reference mismatch') }
-				def match = (approvedImage =~ /^ci-registry-1:5000\/banking-api@sha256:([0-9a-f]{64})$/)
-				if (!match.matches()) { error('ATTESTATION: malformed release digest') }
-				def expectedDigest = match[0][1]
+				// Boolean full-match avoids a non-serializable Matcher in CPS locals.
+				if (!(approvedImage ==~ /^ci-registry-1:5000\/banking-api@sha256:[0-9a-f]{64}$/)) {
+					error('ATTESTATION: malformed release digest')
+				}
+				def expectedDigest = approvedImage.substring(approvedImage.lastIndexOf('sha256:') + 7)
 				def originalPredicate = readJSON(file: 'reports/slsa-provenance-predicate.json', returnPojo: true)
 				def originalSbom = readJSON(file: 'reports/sbom.cdx.json', returnPojo: true)
-				def decoded = [:]
-				['provenance': 'reports/verified-provenance.json', 'sbom': 'reports/verified-sbom.json'].each { kind, file ->
-					def raw = readFile(file).trim()
-					// Cosign v3 in this lab produces one DSSE JSON envelope per type.
-					def envelope = readJSON(text: raw, returnPojo: true)
-					if (!(envelope instanceof Map) || !envelope.payload ||
-						!(envelope.signatures instanceof List) || envelope.signatures.isEmpty()) {
-						error("ATTESTATION: malformed DSSE envelope (${kind})")
+
+				// Cosign can return one JSON DSSE envelope PER LINE (NDJSON).
+				// The same immutable digest may have attestations from earlier Jenkins builds.
+				// Require at least one verified envelope matching THIS build's predicate/SBOM.
+				['provenance': 'reports/verified-provenance.json',
+				 'sbom': 'reports/verified-sbom.json'].each { kind, file ->
+					def lines = readFile(file).readLines().findAll { it.trim() }
+					if (lines.isEmpty()) { error("ATTESTATION: no verified envelopes (${kind})") }
+					boolean foundCurrentRelease = false
+					lines.each { line ->
+						def envelope = readJSON(text: line, returnPojo: true)
+						if (!(envelope instanceof Map) || !envelope.payload ||
+							!(envelope.signatures instanceof List) || envelope.signatures.isEmpty()) {
+							error("ATTESTATION: malformed verified DSSE envelope (${kind})")
+						}
+						def statementText = new String(java.util.Base64.getDecoder().decode(envelope.payload), 'UTF-8')
+						def statement = readJSON(text: statementText, returnPojo: true)
+						boolean validStatement = statement._type in [
+							'https://in-toto.io/Statement/v0.1',
+							'https://in-toto.io/Statement/v1'
+						]
+						boolean validSubject = statement.subject instanceof List &&
+							statement.subject.size() == 1 &&
+							statement.subject[0].digest?.sha256 == expectedDigest &&
+							statement.subject[0].name in [
+								'ci-registry-1:5000/banking-api',
+								'localhost:5000/banking-api'
+							]
+						if (validStatement && validSubject) {
+							if (kind == 'provenance') {
+								if (statement.predicateType == 'https://slsa.dev/provenance/v1' &&
+									statement.predicate == originalPredicate &&
+									statement.predicate.buildDefinition.externalParameters.revision == expectations.gitCommit &&
+									statement.predicate.runDetails.metadata.invocationId == expectations.invocationId) {
+									foundCurrentRelease = true
+								}
+							} else {
+								if (statement.predicateType == 'https://cyclonedx.org/bom' &&
+									statement.predicate == originalSbom &&
+									statement.predicate.bomFormat == 'CycloneDX' &&
+									statement.predicate.components instanceof List &&
+									statement.predicate.components.size() == expectations.sbomComponentCount) {
+									foundCurrentRelease = true
+								}
+							}
+						}
 					}
-					def statementText = new String(java.util.Base64.getDecoder().decode(envelope.payload), 'UTF-8')
-					def statement = readJSON(text: statementText, returnPojo: true)
-					if (!(statement._type in ['https://in-toto.io/Statement/v0.1','https://in-toto.io/Statement/v1'])) {
-						error("ATTESTATION: unexpected statement version (${kind})")
+					if (!foundCurrentRelease) {
+						error("ATTESTATION: no matching verified attestation for current build (${kind})")
 					}
-					if (!(statement.subject instanceof List) || statement.subject.size() != 1 ||
-						statement.subject[0].digest?.sha256 != expectedDigest ||
-						!(statement.subject[0].name in ['ci-registry-1:5000/banking-api','localhost:5000/banking-api'])) {
-						error("ATTESTATION: subject mismatch (${kind})")
-					}
-					decoded[kind] = statement
 				}
-				def prov = decoded.provenance
-				def sbom = decoded.sbom
-				if (prov.predicateType != 'https://slsa.dev/provenance/v1' ||
-					prov.predicate != originalPredicate ||
-					prov.predicate.buildDefinition.externalParameters.revision != expectations.gitCommit ||
-					prov.predicate.runDetails.metadata.invocationId != expectations.invocationId) {
-					error('ATTESTATION: provenance claim mismatch')
-				}
-				if (sbom.predicateType != 'https://cyclonedx.org/bom' ||
-					sbom.predicate != originalSbom ||
-					sbom.predicate.bomFormat != 'CycloneDX' ||
-					sbom.predicate.components.size() != expectations.sbomComponentCount) {
-					error('ATTESTATION: CycloneDX SBOM mismatch')
-				}
+
 				writeFile(file: 'reports/attestation-verified-image.txt', text: "${approvedImage}\n")
 				echo 'RELEASE ATTESTATION SEMANTIC VERIFICATION PASSED'
 			}
