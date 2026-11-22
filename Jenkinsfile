@@ -1,6 +1,6 @@
 pipeline {
   agent { label 'built-in' }
-  options { timestamps(); disableConcurrentBuilds(); buildDiscarder(logRotator(numToKeepStr: '20')); timeout(time: 30, unit: 'MINUTES') }
+  options { timestamps(); disableConcurrentBuilds(); buildDiscarder(logRotator(numToKeepStr: '20')); timeout(time: 45, unit: 'MINUTES') }
   tools { jdk 'jdk21'; maven 'maven3' }
   environment {
     TRIVY = '/usr/local/bin/trivy'
@@ -231,6 +231,9 @@ pipeline {
 				echo "SBOM COMPONENTS: ${components.size()}"
 				echo "SBOM VALIDATION PASSED"
 			}
+
+			// E01: preserve exact SBOM produced by the approved Docker image build.
+			stash(name: 'release-sbom', includes: 'reports/sbom.cdx.json')
 
 		}
 
@@ -518,7 +521,180 @@ pipeline {
 		}
 	}
 
-	/*
+
+	// CD-02.4E E02 — self-reported provenance derived from this exact build.
+	stage('Release Provenance Generation') {
+		agent { label 'docker-build' }
+		steps {
+			checkout scm
+			unstash 'approved-image'
+			unstash 'release-sbom'
+			script {
+				def imageRef = readFile('reports/published-image-digest.txt').trim()
+				def m = (imageRef =~ /^ci-registry-1:5000\/banking-api@sha256:([0-9a-f]{64})$/)
+				if (!m.matches()) { error('PROVENANCE FAILED: unexpected image reference') }
+				def gitSha = sh(script: 'git rev-parse HEAD', returnStdout: true).trim()
+				if (!(gitSha ==~ /[0-9a-f]{40}/)) { error('PROVENANCE FAILED: invalid Git SHA') }
+				def sbom = readJSON(file: 'reports/sbom.cdx.json', returnPojo: true)
+				if (sbom.bomFormat != 'CycloneDX' || !(sbom.components instanceof List) || sbom.components.isEmpty()) {
+					error('PROVENANCE FAILED: invalid or empty CycloneDX SBOM')
+				}
+				def repo = 'https://github.com/thinhhong1973/banking-cicd-lab.git'
+				// Lab-specific identifiers; document the buildType contract before production use.
+				def predicate = [
+					buildDefinition: [
+						buildType: 'https://github.com/thinhhong1973/banking-cicd-lab/blob/lab/trivy-04-remediation/Jenkinsfile',
+						externalParameters: [repository: repo, revision: gitSha, job: env.JOB_NAME],
+						internalParameters: [:],
+						resolvedDependencies: [[
+							uri: "git+${repo}", digest: [gitCommit: gitSha]
+						]]
+					],
+					runDetails: [
+						builder: [id: 'https://github.com/thinhhong1973/banking-cicd-lab#jenkins-local-builder'],
+						metadata: [invocationId: "${env.JOB_NAME}/${env.BUILD_NUMBER}"]
+					]
+				]
+					// Note: the builder.id is a lab identifier, not a verifiable Jenkins identity.
+				writeJSON(file: 'reports/slsa-provenance-predicate.json', json: predicate, pretty: 4)
+				writeJSON(file: 'reports/attestation-expectations.json', json: [
+					imageReference: imageRef,
+					gitCommit: gitSha,
+					invocationId: "${env.JOB_NAME}/${env.BUILD_NUMBER}",
+					sbomComponentCount: sbom.components.size()
+				], pretty: 4)
+				echo "RELEASE PROVENANCE GENERATED (build ${env.BUILD_NUMBER})"
+			}
+			stash(name: 'release-provenance', includes: 'reports/slsa-provenance-predicate.json,reports/attestation-expectations.json')
+		}
+		post {
+			always {
+				archiveArtifacts(artifacts: 'reports/slsa-provenance-predicate.json,reports/attestation-expectations.json', allowEmptyArchive: true, fingerprint: true)
+			}
+		}
+	}
+
+	// CD-02.4E E03 — cosign attest uses OCI format available in this agent.
+	// Do NOT copy legacy cosign sign-only flags into cosign attest.
+	stage('Release Attestation Signing') {
+		agent { label 'docker-build' }
+		steps {
+			unstash 'approved-image'
+			unstash 'release-provenance'
+			unstash 'release-sbom'
+			withEnv(['PATH+COSIGN=/home/jenkins/agent/bin']) {
+				withCredentials([
+					file(credentialsId: 'banking-cosign-private-key', variable: 'COSIGN_KEY_FILE'),
+					string(credentialsId: 'banking-cosign-password', variable: 'COSIGN_PASSWORD')
+				]) {
+					sh '''
+						set -eu
+						set +x
+						IMAGE_REF="$(cat reports/published-image-digest.txt)"
+						case "$IMAGE_REF" in ci-registry-1:5000/banking-api@sha256:*) ;; *) exit 2 ;; esac
+						test -s reports/slsa-provenance-predicate.json
+						test -s reports/sbom.cdx.json
+						cosign attest --key "$COSIGN_KEY_FILE" \
+						  --predicate reports/slsa-provenance-predicate.json \
+						  --type slsaprovenance1 --allow-http-registry --yes "$IMAGE_REF"
+						echo 'PROVENANCE ATTESTATION SIGNED'
+						cosign attest --key "$COSIGN_KEY_FILE" \
+						  --predicate reports/sbom.cdx.json \
+						  --type cyclonedx --allow-http-registry --yes "$IMAGE_REF"
+						echo 'SBOM ATTESTATION SIGNED'
+					'''
+				}
+			}
+		}
+	}
+
+	// CD-02.4E E04 — first verify cryptographic signatures, then verify claims.
+	stage('Release Attestation Verification') {
+		agent { label 'docker-build' }
+		steps {
+			unstash 'approved-image'
+			unstash 'release-provenance'
+			unstash 'release-sbom'
+			withEnv(['PATH+COSIGN=/home/jenkins/agent/bin']) {
+				withCredentials([
+					file(credentialsId: 'banking-cosign-public-key', variable: 'COSIGN_PUBLIC_KEY')
+				]) {
+					sh '''
+						set -eu
+						set +x
+						IMAGE_REF="$(cat reports/published-image-digest.txt)"
+						mkdir -p reports
+						# Local HTTP registry, no transparency-log verification: LAB ONLY.
+						cosign verify-attestation --key "$COSIGN_PUBLIC_KEY" \
+						  --type slsaprovenance1 --allow-http-registry \
+						  --insecure-ignore-tlog=true "$IMAGE_REF" \
+						  > reports/verified-provenance.json
+						cosign verify-attestation --key "$COSIGN_PUBLIC_KEY" \
+						  --type cyclonedx --allow-http-registry \
+						  --insecure-ignore-tlog=true "$IMAGE_REF" \
+						  > reports/verified-sbom.json
+						test -s reports/verified-provenance.json
+						test -s reports/verified-sbom.json
+						echo 'ATTESTATION CRYPTOGRAPHIC VERIFICATION PASSED'
+					'''
+				}
+			}
+			script {
+				def expectations = readJSON(file: 'reports/attestation-expectations.json', returnPojo: true)
+				def approvedImage = readFile('reports/published-image-digest.txt').trim()
+				if (expectations.imageReference != approvedImage) { error('ATTESTATION: image-reference mismatch') }
+				def match = (approvedImage =~ /^ci-registry-1:5000\/banking-api@sha256:([0-9a-f]{64})$/)
+				if (!match.matches()) { error('ATTESTATION: malformed release digest') }
+				def expectedDigest = match[0][1]
+				def originalPredicate = readJSON(file: 'reports/slsa-provenance-predicate.json', returnPojo: true)
+				def originalSbom = readJSON(file: 'reports/sbom.cdx.json', returnPojo: true)
+				def decoded = [:]
+				['provenance': 'reports/verified-provenance.json', 'sbom': 'reports/verified-sbom.json'].each { kind, file ->
+					def raw = readFile(file).trim()
+					// Cosign v3 in this lab produces one DSSE JSON envelope per type.
+					def envelope = readJSON(text: raw, returnPojo: true)
+					if (!(envelope instanceof Map) || !envelope.payload ||
+						!(envelope.signatures instanceof List) || envelope.signatures.isEmpty()) {
+						error("ATTESTATION: malformed DSSE envelope (${kind})")
+					}
+					def statementText = new String(java.util.Base64.getDecoder().decode(envelope.payload), 'UTF-8')
+					def statement = readJSON(text: statementText, returnPojo: true)
+					if (!(statement._type in ['https://in-toto.io/Statement/v0.1','https://in-toto.io/Statement/v1'])) {
+						error("ATTESTATION: unexpected statement version (${kind})")
+					}
+					if (!(statement.subject instanceof List) || statement.subject.size() != 1 ||
+						statement.subject[0].digest?.sha256 != expectedDigest ||
+						!(statement.subject[0].name in ['ci-registry-1:5000/banking-api','localhost:5000/banking-api'])) {
+						error("ATTESTATION: subject mismatch (${kind})")
+					}
+					decoded[kind] = statement
+				}
+				def prov = decoded.provenance
+				def sbom = decoded.sbom
+				if (prov.predicateType != 'https://slsa.dev/provenance/v1' ||
+					prov.predicate != originalPredicate ||
+					prov.predicate.buildDefinition.externalParameters.revision != expectations.gitCommit ||
+					prov.predicate.runDetails.metadata.invocationId != expectations.invocationId) {
+					error('ATTESTATION: provenance claim mismatch')
+				}
+				if (sbom.predicateType != 'https://cyclonedx.org/bom' ||
+					sbom.predicate != originalSbom ||
+					sbom.predicate.bomFormat != 'CycloneDX' ||
+					sbom.predicate.components.size() != expectations.sbomComponentCount) {
+					error('ATTESTATION: CycloneDX SBOM mismatch')
+				}
+				writeFile(file: 'reports/attestation-verified-image.txt', text: "${approvedImage}\n")
+				echo 'RELEASE ATTESTATION SEMANTIC VERIFICATION PASSED'
+			}
+			stash(name: 'attestation-verified-image', includes: 'reports/attestation-verified-image.txt')
+		}
+		post {
+			always {
+				archiveArtifacts(artifacts: 'reports/verified-provenance.json,reports/verified-sbom.json,reports/attestation-verified-image.txt', allowEmptyArchive: true, fingerprint: true)
+			}
+		}
+	}
+
 	stage('Deployment Approval') {
 		when {
 			expression {
@@ -535,7 +711,6 @@ pipeline {
 			}
 		}
 	}
-	*/
 	
 	stage('Kubernetes Deploy & Smoke Test') {
 		agent {
@@ -558,6 +733,7 @@ pipeline {
 				unstash 'approved-image'
 				
 				unstash 'verified-image'
+				unstash 'attestation-verified-image'
 
 				withCredentials([
 					file(
@@ -653,13 +829,15 @@ pipeline {
 						echo "Previous image: $OLD_IMAGE"
 						echo "Approved image: $NEW_IMAGE"
 
+						test -s reports/signature-verified-image.txt
+						test -s reports/attestation-verified-image.txt
+						cmp reports/published-image-digest.txt \
+							reports/signature-verified-image.txt
+						cmp reports/published-image-digest.txt \
+							reports/attestation-verified-image.txt
+						echo "IMAGE SIGNATURE AND RELEASE ATTESTATIONS VERIFIED"
+
 						if [ "$OLD_IMAGE" != "$NEW_IMAGE" ]; then
-							test -s reports/signature-verified-image.txt
-
-							cmp reports/published-image-digest.txt \
-								reports/signature-verified-image.txt
-
-							echo "VERIFIED RELEASE DIGEST MATCHED"
 							kubectl -n "$NS" set image \
 							  deployment/"$DEPLOY" \
 							  banking-api="$NEW_IMAGE"
