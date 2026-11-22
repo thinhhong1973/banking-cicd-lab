@@ -558,8 +558,12 @@ pipeline {
 				if (!(repo ==~ /^https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._~\/-]+(?:\.git)?$/)) {
 					error('PROVENANCE FAILED: unsupported SCM URL or embedded credentials')
 				}
-				def scmHost = new java.net.URI(repo).getHost()
-				if (!scmHost || !scmHost.equalsIgnoreCase(env.PROVENANCE_ALLOWED_SCM_HOST)) {
+				// Jenkins Groovy sandbox rejects new java.net.URI(String).
+				// Previous regex has already validated an HTTPS URL without userinfo/port.
+				// Require the host followed by '/', preventing github.com.evil.example bypass.
+				def approvedHost = (env.PROVENANCE_ALLOWED_SCM_HOST ?: '').trim().toLowerCase()
+				if (!(approvedHost ==~ /[a-z0-9.-]+/) ||
+				    !repo.toLowerCase().startsWith("https://${approvedHost}/")) {
 					error('PROVENANCE FAILED: Git remote is not on the approved SCM host')
 				}
 				def predicate = [
