@@ -1,0 +1,16 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: banking-api-dev
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/thinhhong1973/banking-cicd-lab.git
+    targetRevision: lab/trivy-04-remediation
+    path: gitops/apps/banking-api/overlays/dev
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: banking-dev
+  # CD-03.1 observe-only: deliberately NO syncPolicy.automated.
+  # Do not click SYNC until ownership migration has been approved.
