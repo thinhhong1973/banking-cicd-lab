@@ -5,6 +5,12 @@ pipeline {
   environment {
     TRIVY = '/usr/local/bin/trivy'
     TRIVY_CACHE_DIR = '/var/jenkins_home/.cache/trivy'
+    // Stable lab contract identifiers, NOT claims of a certified SLSA builder.
+    // Keep these independent of the application's Git repository URL.
+    PROVENANCE_BUILD_TYPE = 'urn:banking-cicd:buildtype:jenkins-docker:v1'
+    PROVENANCE_BUILDER_ID = 'urn:banking-cicd:builder:jenkins-local:v1'
+    // Source host allowlist for this lab. Set to an approved SCM host for other projects.
+    PROVENANCE_ALLOWED_SCM_HOST = 'github.com'
   }
   stages {
     stage('Checkout') { steps { checkout scm } }
@@ -541,11 +547,24 @@ pipeline {
 				if (sbom.bomFormat != 'CycloneDX' || !(sbom.components instanceof List) || sbom.components.isEmpty()) {
 					error('PROVENANCE FAILED: invalid or empty CycloneDX SBOM')
 				}
-				def repo = 'https://github.com/thinhhong1973/banking-cicd-lab.git'
-				// Lab-specific identifiers; document the buildType contract before production use.
+				// SCM is evidence from the checked-out commit, not a hardcoded GitHub URL.
+				// Capture in the same agent/workspace as gitSha to avoid cross-agent drift.
+				def repo = sh(script: 'git config --get remote.origin.url', returnStdout: true).trim()
+				if (!repo) { error('PROVENANCE FAILED: missing origin URL') }
+				// Normalize common Git SSH syntax; never include userinfo/password in provenance.
+				if (repo.startsWith('git@')) {
+					repo = repo.replaceFirst(/^git@([^:]+):/, 'https://$1/')
+				}
+				if (!(repo ==~ /^https:\/\/[A-Za-z0-9.-]+\/[A-Za-z0-9._~\/-]+(?:\.git)?$/)) {
+					error('PROVENANCE FAILED: unsupported SCM URL or embedded credentials')
+				}
+				def scmHost = new java.net.URI(repo).getHost()
+				if (!scmHost || !scmHost.equalsIgnoreCase(env.PROVENANCE_ALLOWED_SCM_HOST)) {
+					error('PROVENANCE FAILED: Git remote is not on the approved SCM host')
+				}
 				def predicate = [
 					buildDefinition: [
-						buildType: 'https://github.com/thinhhong1973/banking-cicd-lab/blob/lab/trivy-04-remediation/Jenkinsfile',
+						buildType: env.PROVENANCE_BUILD_TYPE,
 						externalParameters: [repository: repo, revision: gitSha, job: env.JOB_NAME],
 						internalParameters: [:],
 						resolvedDependencies: [[
@@ -553,15 +572,16 @@ pipeline {
 						]]
 					],
 					runDetails: [
-						builder: [id: 'https://github.com/thinhhong1973/banking-cicd-lab#jenkins-local-builder'],
+						builder: [id: env.PROVENANCE_BUILDER_ID],
 						metadata: [invocationId: "${env.JOB_NAME}/${env.BUILD_NUMBER}"]
 					]
 				]
-					// Note: the builder.id is a lab identifier, not a verifiable Jenkins identity.
+				// Builder ID is a locally declared identity, NOT externally verified.
 				writeJSON(file: 'reports/slsa-provenance-predicate.json', json: predicate, pretty: 4)
 				writeJSON(file: 'reports/attestation-expectations.json', json: [
 					imageReference: imageRef,
 					gitCommit: gitSha,
+					repository: repo,
 					invocationId: "${env.JOB_NAME}/${env.BUILD_NUMBER}",
 					sbomComponentCount: sbom.components.size()
 				], pretty: 4)
@@ -685,6 +705,7 @@ pipeline {
 								if (statement.predicateType == 'https://slsa.dev/provenance/v1' &&
 									statement.predicate == originalPredicate &&
 									statement.predicate.buildDefinition.externalParameters.revision == expectations.gitCommit &&
+									statement.predicate.buildDefinition.externalParameters.repository == expectations.repository &&
 									statement.predicate.runDetails.metadata.invocationId == expectations.invocationId) {
 									foundCurrentRelease = true
 								}
@@ -768,8 +789,11 @@ pipeline {
 						set +x
 
 						echo "Checking Kubernetes authentication..."
-
-						kubectl -n banking-dev get deployment banking-api
+						# Credential ID remains banking-dev-kubeconfig: update its file in Jenkins UI.
+						test -s "$KUBECONFIG" || { echo 'Kubeconfig credential file missing'; exit 2; }
+						kubectl config current-context >/dev/null
+						# No token, kubeconfig content or private credential is printed.
+						kubectl --request-timeout=10s -n banking-dev get deployment banking-api
 
 						echo "Checking deployment permission..."
 
