@@ -741,223 +741,49 @@ pipeline {
 		}
 	}
 
-	stage('Deployment Approval') {
-		when {
-			expression {
-				currentBuild.currentResult == 'SUCCESS'
-			}
-		}
-
+	// CD-03.2-E — CI-only verified release handoff; NO kubectl, kubeconfig or Argo sync.
+	stage('GitOps Release Handoff') {
+		agent { label 'docker-build' }
 		steps {
-			timeout(time: 10, unit: 'MINUTES') {
-				input(
-					message: 'Deploy approved Banking API to banking-dev?',
-					ok: 'Approve Deployment'
-				)
-			}
-		}
-	}
-	
-	stage('Kubernetes Deploy & Smoke Test') {
-		agent {
-			label 'docker-build'
-		}
-		
-		steps {
-			withEnv(['PATH+KUBECTL=/home/jenkins/agent/bin']) {
-
-				sh '''
-					set -eu
-
-					echo "Checking kubectl..."
-					command -v kubectl
-					kubectl version --client
-
-					echo "Kubectl ready"
-				'''
-
-				unstash 'approved-image'
-				
-				unstash 'verified-image'
-				unstash 'attestation-verified-image'
-
-				withCredentials([
-					file(
-						credentialsId: 'banking-dev-kubeconfig',
-						variable: 'KUBECONFIG'
-					)
-				]) {
-				
-					sh '''
-						set -eu
-						set +x
-
-						echo "Checking Kubernetes authentication..."
-						# Credential ID remains banking-dev-kubeconfig: update its file in Jenkins UI.
-						test -s "$KUBECONFIG" || { echo 'Kubeconfig credential file missing'; exit 2; }
-						kubectl config current-context >/dev/null
-						# No token, kubeconfig content or private credential is printed.
-						kubectl --request-timeout=10s -n banking-dev get deployment banking-api
-
-						echo "Checking deployment permission..."
-
-						kubectl auth can-i patch deployment/banking-api \
-						  -n banking-dev
-
-						echo "KUBERNETES AUTHENTICATION PASSED"
-					'''
-		
-					sh '''
-						set -eu
-						set +x
-						
-						echo "Checking Kubernetes RBAC..."
-
-						test "$(kubectl auth can-i get deployment/banking-api \
-						  -n banking-dev)" = "yes"
-
-						test "$(kubectl auth can-i patch deployment/banking-api \
-						  -n banking-dev)" = "yes"
-
-						test "$(kubectl auth can-i list deployments \
-						  -n banking-dev)" = "yes"
-
-						echo "KUBERNETES RBAC CHECK PASSED"
-
-						NS="banking-dev"
-						DEPLOY="banking-api"
-						NEW_IMAGE="$(cat reports/published-image-digest.txt)"
-						OLD_IMAGE="$(kubectl -n "$NS" get deployment "$DEPLOY" \
-						  -o jsonpath='{.spec.template.spec.containers[0].image}')"
-
-						case "$NEW_IMAGE" in
-						  ci-registry-1:5000/banking-api@sha256:*) ;;
-						  *) echo "Invalid approved image reference"; exit 1 ;;
-						esac
-
-						mkdir -p reports
-						printf '%s\\n' "$OLD_IMAGE" \
-						  > reports/previous-image.txt
-						printf '%s\\n' "$NEW_IMAGE" \
-						  > reports/deployed-image.txt
-
-						DEPLOY_STARTED=0
-						COMPLETED=0
-						PF_PID=""
-
-						cleanup() {
-							rc=$?
-							trap - EXIT
-
-							if [ -n "$PF_PID" ]; then
-								kill "$PF_PID" 2>/dev/null || true
-							fi
-
-							if [ "$COMPLETED" -ne 1 ] &&
-							   [ "$DEPLOY_STARTED" -eq 1 ]; then
-								echo "Deployment failed. Restoring previous image..."
-
-								kubectl -n "$NS" set image \
-								  deployment/"$DEPLOY" \
-								  banking-api="$OLD_IMAGE" || true
-
-								kubectl -n "$NS" rollout status \
-								  deployment/"$DEPLOY" \
-								  --timeout=180s || true
-
-								echo "ROLLBACK ATTEMPTED"
-								printf '%s\\n' "ROLLBACK_ATTEMPTED" \
-								  > reports/deploy-result.txt
-							fi
-
-							exit "$rc"
-						}
-
-						trap cleanup EXIT
-
-						echo "Previous image: $OLD_IMAGE"
-						echo "Approved image: $NEW_IMAGE"
-
-						test -s reports/signature-verified-image.txt
-						test -s reports/attestation-verified-image.txt
-						cmp reports/published-image-digest.txt \
-							reports/signature-verified-image.txt
-						cmp reports/published-image-digest.txt \
-							reports/attestation-verified-image.txt
-						echo "IMAGE SIGNATURE AND RELEASE ATTESTATIONS VERIFIED"
-
-						if [ "$OLD_IMAGE" != "$NEW_IMAGE" ]; then
-							kubectl -n "$NS" set image \
-							  deployment/"$DEPLOY" \
-							  banking-api="$NEW_IMAGE"
-
-							DEPLOY_STARTED=1
-						fi
-
-						kubectl -n "$NS" rollout status \
-						  deployment/"$DEPLOY" \
-						  --timeout=180s
-
-						kubectl -n "$NS" get deployment "$DEPLOY" \
-						  -o yaml > reports/deployment-evidence.yaml
-
-						ACTUAL_IMAGE="$(kubectl -n "$NS" get deployment "$DEPLOY" \
-						  -o jsonpath='{.spec.template.spec.containers[0].image}')"
-
-						test "$ACTUAL_IMAGE" = "$NEW_IMAGE"
-
-						kubectl -n "$NS" get deployment "$DEPLOY" \
-						  -o jsonpath='{.status.readyReplicas}' \
-						  > reports/ready-replicas.txt
-
-						test "$(cat reports/ready-replicas.txt)" = "2"
-
-						# Port forward for smoke testing
-						kubectl -n "$NS" port-forward \
-						  service/banking-api 18080:8080 \
-						  > reports/port-forward.log 2>&1 &
-
-						PF_PID=$!
-
-						READY=0
-						for i in $(seq 1 30); do
-							if curl -fsS \
-							  http://127.0.0.1:18080/actuator/health/readiness \
-							  > reports/readiness.json 2>/dev/null; then
-								READY=1
-								break
-							fi
-							sleep 2
-						done
-
-						test "$READY" -eq 1
-						grep -q '"status":"UP"' reports/readiness.json
-
-						curl -fsS \
-						  http://127.0.0.1:18080/api/v1/accounts/ACC-001/balance \
-						  > reports/balance-smoke.json
-
-						grep -q 'VND' reports/balance-smoke.json
-
-						printf '%s\\n' "SUCCESS" \
-						  > reports/deploy-result.txt
-
-						COMPLETED=1
-						echo "KUBERNETES DEPLOYMENT PASSED"
-						echo "REST SMOKE TEST PASSED"
-					'''
+			unstash 'approved-image'
+			unstash 'verified-image'
+			unstash 'attestation-verified-image'
+			unstash 'release-provenance'
+			script {
+				def approved = readFile('reports/published-image-digest.txt').trim()
+				def signed = readFile('reports/signature-verified-image.txt').trim()
+				def attested = readFile('reports/attestation-verified-image.txt').trim()
+				if (!(approved ==~ /^ci-registry-1:5000\/banking-api@sha256:[0-9a-f]{64}$/)) {
+					error('HANDOFF FAILED: invalid immutable image digest reference')
 				}
-				
+				if (approved != signed || approved != attested) {
+					error('HANDOFF FAILED: signed/attested digest mismatch')
+				}
+				def expectations = readJSON(file: 'reports/attestation-expectations.json', returnPojo: true)
+				if (expectations.imageReference != approved ||
+					expectations.invocationId != "${env.JOB_NAME}/${env.BUILD_NUMBER}") {
+					error('HANDOFF FAILED: release identity mismatch')
+				}
+				def release = [
+					schemaVersion: 'banking.gitops.release-handoff/v1',
+					status: 'VERIFIED_PENDING_GITOPS_PROMOTION',
+					image: approved,
+					gitCommit: expectations.gitCommit,
+					repository: expectations.repository,
+					invocationId: expectations.invocationId,
+					application: 'banking-api-dev',
+					namespace: 'banking-dev',
+					gitopsPath: 'gitops/apps/banking-api/overlays/dev',
+					requiresReview: true,
+					requiresArgoManualSync: true
+				]
+				writeJSON(file: 'reports/gitops-release-handoff.json', json: release, pretty: 4)
+				echo 'GITOPS RELEASE HANDOFF GENERATED — NO DEPLOYMENT PERFORMED'
 			}
 		}
-
 		post {
 			always {
-				archiveArtifacts(
-					artifacts: 'reports/deploy-result.txt,reports/previous-image.txt,reports/deployed-image.txt,reports/deployment-evidence.yaml,reports/ready-replicas.txt,reports/readiness.json,reports/balance-smoke.json,reports/port-forward.log',
-					allowEmptyArchive: true,
-					fingerprint: true
-				)
+				archiveArtifacts(artifacts: 'reports/gitops-release-handoff.json', allowEmptyArchive: true, fingerprint: true)
 			}
 		}
 	}
@@ -974,7 +800,7 @@ pipeline {
             fingerprint: true
         )
     }
-    success { echo 'CI.2 security gates passed; artifacts archived.' }
-    failure { echo 'CI.2 failed: inspect first failing stage and scanner report.' }
+    success { echo 'CI-ONLY security gates passed; GitOps release handoff archived. No kubectl deployment.' }
+    failure { echo 'CI-ONLY failed: inspect first failing stage and scanner report.' }
   }
 }
